@@ -1,0 +1,13 @@
+# Robots.txt for Kozhihood Restaurant Website (Erode, Tamil Nadu)
+User-agent: *
+Allow: /
+Allow: /menu
+Allow: /reviews
+
+# Private and Administrative Routes
+Disallow: /admin/
+Disallow: /admin/reviews
+Disallow: /login
+
+# Sitemap location (relative; update with production domain e.g. https://kozhihood.com/sitemap.xml when domain is connected)
+Sitemap: /sitemap.xml
