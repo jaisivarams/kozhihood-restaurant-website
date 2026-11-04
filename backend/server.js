@@ -10,15 +10,9 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Enable CORS
-const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
 app.use(
   cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, curl, or Postman)
-      if (!origin) return callback(null, true);
-      // In development, allow localhost or specified client origin
-      return callback(null, true);
-    },
+    origin: (origin, callback) => callback(null, true),
     credentials: true
   })
 );
@@ -27,22 +21,78 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Health Check Endpoint
-app.get('/api/health', (req, res) => {
+// ---- Database connection (cached so it works on Vercel) ----
+let cached = global._mongooseCache;
+if (!cached) {
+  cached = global._mongooseCache = { conn: null, promise: null };
+}
+
+async function connectDB() {
+  const mongoUri = process.env.MONGODB_URI;
+  if (!mongoUri) {
+    throw new Error('MONGODB_URI is not set');
+  }
+  if (cached.conn && mongoose.connection.readyState === 1) {
+    return cached.conn;
+  }
+  if (!cached.promise) {
+    cached.promise = mongoose
+      .connect(mongoUri, {
+        bufferCommands: false,
+        serverSelectionTimeoutMS: 10000,
+        maxPoolSize: 5
+      })
+      .then((m) => m);
+  }
+  try {
+    cached.conn = await cached.promise;
+  } catch (err) {
+    cached.promise = null;
+    cached.conn = null;
+    throw err;
+  }
+  return cached.conn;
+}
+
+// Health Check Endpoint (tries to connect and shows the real error if it fails)
+app.get('/api/health', async (req, res) => {
   const dbStatusMap = {
     0: 'disconnected',
     1: 'connected',
     2: 'connecting',
     3: 'disconnecting'
   };
+  try {
+    await connectDB();
+    res.status(200).json({
+      status: 'ok',
+      service: 'Kozhihood Restaurant Backend API',
+      database: dbStatusMap[mongoose.connection.readyState] || 'unknown',
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error('DB connection failed:', err.name, err.message);
+    res.status(500).json({
+      status: 'error',
+      database: 'failed',
+      errorName: err.name,
+      errorMessage: err.message
+    });
+  }
+});
 
-  res.status(200).json({
-    status: 'ok',
-    service: 'Kozhihood Restaurant Backend API',
-    database: dbStatusMap[mongoose.connection.readyState] || 'unknown',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
-  });
+// Make sure the database is connected before any other API route runs
+app.use('/api', async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error('DB connection failed:', err.name, err.message);
+    res.status(503).json({
+      success: false,
+      message: 'Database connection failed. Please try again.'
+    });
+  }
 });
 
 // API Routes
@@ -61,7 +111,6 @@ app.use('/api', (req, res) => {
 app.use((err, req, res, next) => {
   console.error('Unhandled Application Error:', err);
 
-  // Handle Mongoose / MongoDB validation errors
   if (err.name === 'ValidationError') {
     const messages = Object.values(err.errors).map((e) => e.message);
     return res.status(400).json({
@@ -71,7 +120,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Handle duplicate key error (code 11000)
   if (err.code === 11000) {
     return res.status(400).json({
       success: false,
@@ -85,48 +133,12 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Database Connection and Server Startup
-const startServer = async () => {
-  const mongoUri = process.env.MONGODB_URI;
-
-  if (!mongoUri || mongoUri.includes('<username>') || mongoUri.includes('<password>')) {
-    console.warn('\n⚠️  [Kozhihood Backend Notice]');
-    console.warn('MONGODB_URI is not configured with real credentials in backend/.env.');
-    console.warn('Please add your MongoDB Atlas connection string to backend/.env to persist data.');
-    console.warn('Server will still start to provide health checks and handle requests.\n');
-  } else {
-    try {
-      await mongoose.connect(mongoUri);
-      console.log('✅ Connected to MongoDB Atlas successfully.');
-    } catch (err) {
-      console.error('\n❌ MongoDB Atlas connection failed');
-      console.error('Error name:', err.name);
-      console.error('Error message:', err.message);
-      console.error('Error code:', err.code || 'N/A');
-
-      if (err.reason) {
-        console.error('Connection reason:', err.reason);
-      }
-
-      if (err.cause) {
-        console.error('Underlying cause:', err.cause);
-      }
-
-      console.error('\n🔍 Since DNS and TCP connectivity are working, check:');
-      console.error('1. MongoDB Atlas database username/password');
-      console.error('2. MONGODB_URI in backend/.env');
-      console.error('3. Special characters in the database password');
-      console.error('4. Database user permissions');
-      console.error('');
-    }
-  }
-
+// Only start a listening server on your laptop, not on Vercel
+if (!process.env.VERCEL) {
   app.listen(PORT, () => {
-    console.log(`🚀 Kozhihood Server running on http://localhost:${PORT}`);
-    console.log(`🩺 Health check available at: http://localhost:${PORT}/api/health`);
+    console.log(`Kozhihood Server running on http://localhost:${PORT}`);
+    console.log(`Health check: http://localhost:${PORT}/api/health`);
   });
-};
-
-startServer();
+}
 
 module.exports = app;
